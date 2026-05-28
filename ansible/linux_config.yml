@@ -1,0 +1,130 @@
+---
+- name: Linux Server 기본 환경 셋팅 (Rocky, CentOS, Ubuntu 공통)
+  # 수정: 인벤토리의 [linux] 하드코딩 그룹 대신 add_host가 생성한 메모리 그룹을 타겟팅
+  hosts: baremetal_hosts 
+  gather_facts: no 
+  vars:
+    # 수정: SSH 접속을 위한 패스워드를 orchestrator(add_host)에서 동적으로 받음
+    ansible_user: "root"
+    ansible_password: "{{ root_pw }}"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+    new_ssh_port: 33899                   # 변경할 원격 포트
+    subnet_prefix: "27"                   # Subnet Mask (27 = 255.255.255.224)
+    # 수정: ${var} 문법을 {{ var }} Jinja2 문법으로 변경
+    default_gateway: "{{ node_gw }}"      # 게이트웨이 IP   
+    node_dns: "{{ node_dns }}"            # DNS       
+
+  tasks:
+    # ★ `wait_for_connection` 태스크: OS 설치 후 리부팅되어 SSH 데몬이 올라올 때까지 자동으로 재시도하며 기다려주는 매우 유용한 모듈입니다.
+    - name: "Task 0: Linux 설치 및 SSH 응답 대기 (최대 30분)"
+      wait_for_connection:
+        delay: 60       # 처음 60초는 부팅 대기
+        sleep: 10       # 10초에 한 번씩 SSH 접속 시도
+        timeout: 1800   # 최대 30분 대기
+      tags: always  # 네트워크나 방화벽 태그만 실행하더라도 접속 대기는 필수이므로 always 지정
+      
+    - name: "Task 0-1: 팩트 수집 (OS 종류 확인을 위해 필수)"
+      setup:        # 위에서 gather_facts: no를 했기 때문에, 접속 성공 후 수동으로 팩트를 수집합니다.
+      tags: always  # OS 분기 처리를 위해 팩트 수집도 항상 실행
+
+    - name: "[Ubuntu] chrony 패키지 설치"
+      apt: name=chrony state=present update_cache=yes
+      when: ansible_os_family == 'Debian'
+      tags: ['time', 'ntp'] # 배열 형태로 여러 개의 태그 부여 가능
+
+    - name: "[Rocky] chrony 패키지 설치"
+      yum: name=chrony state=present
+      when: ansible_os_family == 'RedHat'
+      tags: ['time', 'ntp']
+
+    - name: "[Ubuntu] chrony 서비스 재시작 및 활성화 (데몬명: chrony)"
+      service: name=chrony state=restarted enabled=yes
+      when: ansible_os_family == 'Debian'
+
+    - name: "[Rocky] chronyd 서비스 재시작 및 활성화 (데몬명: chronyd)"
+      service: name=chronyd state=restarted enabled=yes
+      when: ansible_os_family == 'RedHat'
+
+    - name: "[Ubuntu] sysstat 설치"
+      apt: name=sysstat state=present
+      when: ansible_os_family == 'Debian'
+
+    - name: "[Rocky] sysstat 설치"
+      yum: name=sysstat state=present
+      when: ansible_os_family == 'RedHat'
+
+    - name: "[공통] sysstat 서비스 활성화"
+      service: name=sysstat state=started enabled=yes
+      tags: ['security', 'monitoring']
+
+    - name: "[Rocky] SELinux 비활성화"
+      selinux: state=disabled
+      when: ansible_os_family == 'RedHat'
+      tags: ['security', 'selinux']
+
+    - name: "[Rocky, CentOS] 고정 IP 및 DNS 설정 (nmcli)"
+      command: >
+        nmcli con mod eth0 
+        ipv4.addresses {{ inventory_hostname }}/{{ subnet_prefix }} 
+        ipv4.gateway {{ node_gw }} 
+        ipv4.dns "{{ node_dns }}" 
+        ipv4.method manual
+      when: ansible_os_family == 'RedHat'
+      ignore_errors: yes
+      tags: network
+
+    - name: "[Rocky, CentOS] NetworkManager 서비스 재시작 (비동기)"
+      service: name=NetworkManager state=restarted
+      async: 10
+      poll: 0
+      when: ansible_os_family == 'RedHat'
+      ignore_errors: yes
+
+    - name: "[Rocky, CentOS] Firewalld - 변경된 SSH 포트 허용 및 방화벽 활성화"
+      firewalld:
+        port: "{{ new_ssh_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: ansible_os_family == 'RedHat'
+      tags: ['firewall', 'security']
+
+    - name: "Task 1 (Ubuntu): 고정 IP 설정 (Netplan 사용)"
+      copy:
+        dest: /etc/netplan/01-netcfg.yaml
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth0:
+                dhcp4: no
+                addresses: [{{ inventory_hostname }}/{{ subnet_prefix }}]
+                gateway4: {{ node_gw }}
+                nameservers:
+                  addresses: [{{ node_dns }}]
+      when: ansible_os_family == 'Debian'
+      tags: network
+
+    - name: "Task 2 (Ubuntu): Netplan 적용"
+      command: netplan apply
+      async: 10
+      poll: 0
+      when: ansible_os_family == 'Debian'
+
+    - name: "[Ubuntu] UFW - 변경된 SSH 포트 허용 및 방화벽 활성화"
+      ufw:
+        rule: allow
+        port: "{{ new_ssh_port }}"
+        proto: tcp
+        state: enabled
+      when: ansible_os_family == 'Debian'
+
+    - name: "[공통] SSH 포트 {{ new_ssh_port }}로 변경"
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?Port'
+        line: "Port {{ new_ssh_port }}"
+        tags: ['ssh', 'security']
+        
+    - name: "[공통] SSH 서비스 재시작"
+      service: name=sshd state=restarted

@@ -1,0 +1,138 @@
+---
+- name: Windows Server 기본 환경 셋팅
+  hosts: baremetal_hosts 
+  gather_facts: no        # ★중요: 접속되기 전이므로 팩트 수집을 꺼둬야 에러가 안 납니다.
+  vars:
+    ansible_user: "Administrator"
+    ansible_password: "WinP@ss123!"
+    ansible_connection: "winrm"
+    ansible_winrm_server_cert_validation: ignore
+    new_rdp_port: 33899                           # 변경할 원격 포트        
+    # 수정: 기본 게이트웨이 역시 orchestrator에서 넘겨받은 변수 사용
+    default_gateway: "{{ node_gw }}" 
+    subnet_prefix: 24                             # Subnet Mask (24 = 255.255.255.0)        
+    ansible_winrm_read_timeout_sec: 120
+    ansible_winrm_operation_timeout_sec: 100
+
+  tasks:
+    # ★ Windows용 연결 대기 태스크: WinRM 서비스가 올라올 때까지 자동으로 폴링을 시도합니다.
+    - name: "Task 0: Windows 설치 및 WinRM 응답 대기 (최대 40분)"
+      wait_for_connection:
+        delay: 60           # 처음 60초는 서버가 켜지는 중이므로 묻지 않고 대기  
+        sleep: 15           # 15초 간격으로 WinRM 접속(Ping) 시도
+        timeout: 2400       # 최대 40분(2400초)까지 인내심을 갖고 대기
+      tags: always
+      
+    - name: "Task 0-1: 팩트 수집 (접속 성공 시 OS 정보 읽어오기)"
+      setup:        # 위에서 gather_facts: no를 했기 때문에, 접속 성공 후 수동으로 팩트를 수집합니다.
+      tags: always  # OS 분기 처리를 위해 팩트 수집도 항상 실행
+
+    - name: "Task 2: 'sa' 사용자 계정 비활성화"
+      win_user:
+        name: "sa"
+        account_disabled: yes
+        state: present
+      tags: ['security', 'account']
+
+    - name: "Task 3-1: 고정 IP, Subnet, Gateway 설정 (비동기 실행)"
+      win_shell: |
+        $adapter = Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1
+        # 수정: target_os_ip를 inventory_hostname으로 변경
+        New-NetIPAddress -InterfaceAlias $adapter.Name -IPAddress "{{ inventory_hostname }}" -PrefixLength 24 -DefaultGateway "{{ default_gateway }}" -AddressFamily IPv4
+      async: 10 
+      poll: 0
+      ignore_unreachable: yes   # 핑이 안 나가도 실패로 간주하지 않고 다음 대기 Task로 넘어감
+      ignore_errors: yes        # 이미 IP가 설정되어 세션이 끊기는 것을 방지
+      tags: network
+
+    - name: "Task 3-1.5: 접속 대상(Inventory IP)을 방금 설정한 새 고정 IP로 동적 변경"
+      set_fact:
+        ansible_host: "{{ inventory_hostname }}"
+      tags: network
+
+    - name: "Task 3-1.6: 변경된 새 IP로 WinRM 접속이 복구될 때까지 대기"
+      wait_for_connection:
+        delay: 5       # IP가 적용되고 네트워크 어댑터가 재시작될 시간을 5초 줍니다.
+        sleep: 5       # 5초 간격으로 새 IP에 접속을 시도합니다.
+        timeout: 120   # 최대 2분간 기다립니다
+      tags: network
+
+    - name: "Task 3-2: IDC DNS 설정"
+      win_dns_client:
+        adapter_names: "*"
+        ipv4_addresses:
+          - "219.250.36.130"    # 주 DNS IP   
+          - "210.220.163.82"    # 보조 DNS IP
+      tags: ['network', 'dns']
+
+    - name: "Task 3-3: NetBIOS over TCP/IP 사용 안 함"
+      win_shell: |
+        $adapter = Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | Select-Object -First 1
+        Set-NetAdapterBinding -Name $adapter.Name -ComponentID "ms_netbios" -Enabled $false
+      tags: ['network', 'security']
+
+    - name: "Task 4: RDP 포트를 {{ new_rdp_port }}로 변경 (레지스트리 2곳)"
+      win_regedit:
+        path: "{{ item }}"
+        name: PortNumber
+        data: "{{ new_rdp_port }}"
+        type: dword
+      loop:
+        - "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\Wds\\rdpwd\\Tds\\tcp"
+        - "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp"
+      tags: ['rdp', 'security']
+
+    - name: "Task 5: 변경된 RDP 포트 방화벽 허용 (원격연결_Port)"
+      win_firewall_rule:
+        name: "원격연결_Port"
+        localport: "{{ new_rdp_port }}"
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+      tags: ['firewall', 'rdp', 'security']
+
+    - name: "Task 6: 원격 데스크톱 연결(RDP) 기능 활성화"
+      win_regedit:
+        path: "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
+        name: fDenyTSConnections
+        data: 0
+        type: dword
+      tags: ['rdp']
+
+    - name: "완료 후 Windows 재부팅 (포트 변경 및 네트워크 적용을 위해)"
+      win_reboot:
+        reboot_timeout: 300
+      # 주의: 여기를 always로 주면 어떤 태그를 돌리든 5분씩 재부팅을 하므로 명시적으로 reboot 태그를 부여합니다.
+      tags: ['reboot']
+
+    - name: "Task 7: Windows 패치 무한 루프 런타임 진입 (최대 3회)"
+      ansible.windows.win_updates:
+        category_names: 
+          - SecurityUpdates
+          - CriticalUpdates
+          - UpdateRollups
+          - Updates
+          - DefinitionUpdates
+        state: installed
+        reboot: true
+        reboot_timeout: 3600
+      # 업데이트 수행 결과를 register로 받아옵니다.
+      register: update_result
+      # 에러가 나더라도(예: 일시적인 업데이트 서버 통신 실패) 루프를 돌기 위해 일단 무시합니다.
+      ignore_errors: true
+      # failed_update_count가 0이고, installed_update_count가 0이면 업데이트가 완전히 끝난 것으로 간주하고 빠져나옵니다.
+      until: >
+        update_result is not failed and
+        update_result.found_update_count == 0
+      # 최대 몇 번 루프를 돌 것인지 설정합니다. (1회 시도 + 3회 재시도 = 총 4회 패스)
+      retries: 3
+      # 각 재시도 사이에 10초의 딜레이를 줍니다.
+      delay: 10
+      tags: ['update', 'patch']
+
+    - name: "Task 8: 업데이트 결과 최종 확인"
+      ansible.builtin.debug:
+        msg: "Windows Update가 성공적으로 완료되었습니다. (마지막 상태: {{ update_result.installed_update_count }}개 설치됨)"
+      tags: ['update', 'patch']

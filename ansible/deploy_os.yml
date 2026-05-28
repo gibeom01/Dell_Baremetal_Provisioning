@@ -1,0 +1,110 @@
+---
+- name: Dell iDRAC 가상 CD-ROM 마운트 및 OS 배포 (RACADM 통합 완전판)
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    idrac_ssh_vars: &idrac_ssh_vars
+      ansible_connection: ssh
+      ansible_user: "{{ idrac_user }}"
+      ansible_password: "{{ idrac_password }}"
+      # 기존 옵션에 'NoHostAuthenticationForLocalhost' 등을 추가하여 더 확실하게 제어합니다.
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+  tasks:
+    - name: "Task 1: 기존 가상 미디어 연결 해제 (RACADM)"
+      ansible.builtin.raw: "racadm remoteimage -d"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "Task 1.5-A: RedHat 계열 Kickstart 생성"
+      ansible.builtin.template:
+        src: templates/rocky_ks.j2
+        # 수정: 하드코딩된 절대경로 대신 playbook_dir를 이용한 상대경로 사용
+        dest: "{{ playbook_dir }}/../iso/rocky_ks.cfg"
+      delegate_to: localhost
+      # node_type이 rocky나 centos 계열일 때만 실행
+      when: "'rocky' in node_type or 'centos' in node_type"
+      vars:
+        node_volume_root_size: "{{ node_volume_root_size }}"
+        node_volume_swap_size: "{{ node_volume_swap_size }}"
+        node_volume_boot_size: "{{ node_volume_boot_size }}"
+        node_volume_var_size: "{{ node_volume_var_size }}"
+        node_volume_data_size: "{{ node_volume_data_size }}"
+        node_volume_tmp_size: "{{ node_volume_tmp_size }}"
+        node_volume_home_size: "{{ node_volume_home_size }}"
+
+    - name: "Task 1.5-B1: 모던 Ubuntu (20.04+) user-data 생성"
+      ansible.builtin.template:
+        src: templates/ubuntu_user_data.j2
+        dest: "{{ playbook_dir }}/../iso/user-data"
+      delegate_to: localhost
+      when: node_type == 'ubuntu'
+      vars:
+        node_volume_root_size: "{{ node_volume_root_size }}"
+        node_volume_swap_size: "{{ node_volume_swap_size }}"
+        node_volume_boot_size: "{{ node_volume_boot_size }}"
+        node_volume_var_size: "{{ node_volume_var_size }}"
+        node_volume_data_size: "{{ node_volume_data_size }}"
+        node_volume_tmp_size: "{{ node_volume_tmp_size }}"
+        node_volume_home_size: "{{ node_volume_home_size }}"
+
+    - name: "Task 1.5-B2: 모던 Ubuntu (20.04+) meta-data 빈 파일 생성"
+      ansible.builtin.copy:
+        content: "instance-id: baremetal-node\nlocal-hostname: ubuntu-server"
+        dest: "{{ playbook_dir }}/../iso/meta-data"
+      delegate_to: localhost
+      when: node_type == 'ubuntu'
+
+    - name: "Task 1.5-C: 구형 Ubuntu (16/18) preseed 생성"
+      ansible.builtin.template:
+        src: templates/ubuntu_preseed.j2
+        dest: "{{ playbook_dir }}/../iso/ubuntu_preseed.seed"
+      delegate_to: localhost
+      # node_type이 ubuntu_legacy 일 때만 실행
+      when: node_type == 'ubuntu_legacy'
+      vars:
+        node_volume_root_size: "{{ node_volume_root_size }}"
+        node_volume_swap_size: "{{ node_volume_swap_size }}"
+        node_volume_boot_size: "{{ node_volume_boot_size }}"
+        node_volume_var_size: "{{ node_volume_var_size }}"
+        node_volume_data_size: "{{ node_volume_data_size }}"
+        node_volume_tmp_size: "{{ node_volume_tmp_size }}"
+        node_volume_home_size: "{{ node_volume_home_size }}"
+
+    - name: "Step 2: Mac(Python 서버)의 ISO 파일을 가상 CD로 마운트"
+      # 주의: 169.254.0.4 자리에 Python HTTP 서버가 띄워진 Mac의 정확한 통신 IP를 적어주세요!
+      ansible.builtin.raw: "racadm remoteimage -c -l http://{{ mac_http_ip }}/iso/{{ iso_name }}"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+
+    - name: "Task 3: 네트워크를 통한 ISO 마운트 안정화 대기"
+      pause:
+        seconds: 25
+
+    - name: "Task 4: OS 타입에 맞춰 BootMode 설정"
+      ansible.builtin.raw: >
+        {% if node_type == 'centos_legacy' %}
+        racadm set BIOS.BiosBootSettings.BootMode Bios
+        {% else %}
+        racadm set BIOS.BiosBootSettings.BootMode Uefi
+        {% endif %}
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+
+    - name: "Task 5: BIOS 설정 변경 내역을 적용하기 위해 Job Queue 등록"
+      ansible.builtin.raw: "racadm jobqueue create BIOS.Setup.1-1"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "Task 6: 다음 1회 부팅 대상을 무조건 가상 CD(VCD-DVD)로 지정"
+      ansible.builtin.raw: "racadm set iDRAC.ServerBoot.FirstBootDevice VCD-DVD"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+
+    - name: "Step 7: Job Queue 실행 및 OS 설치를 위한 서버 강제 재부팅"
+      ansible.builtin.raw: "racadm serveraction powercycle"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars

@@ -1,0 +1,72 @@
+Mac OS
+
+# 패키지 매니저 및 필수 코어 엔진 설치
+
+1. brew install ansible xorriso p7zip nginx
+2. brew tap esolitos/ipa
+3. brew install sshpass
+
+# Python 의존성 및 Ansible Collection 설치
+
+1. /Library/Developer/CommandLineTools/usr/bin/python3 -m pip install --upgrade pip
+2. pip3 install requests omsdk --break-system-packages (최신 macOS은 시스템 파이썬 보호 위해 --break-system-packages 플래그 필요할 수 있음)
+3. ansible-galaxy collection install dellemc.openmanage (Ansible용 Dell OpenManage 통합 컬렉션 설치)
+
+# Nginx 로컬 웹 서버 구성 (ISO 및 Kickstart 배포용)
+
+1. sudo vi /usr/local/etc/nginx/nginx.conf (Apple Silicon M1/M2 맥의 경우: /opt/homebrew/etc/nginx/nginx.conf)
+2. vi nginx.conf
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    sendfile        on;
+    tcp_nopush      on;
+    keepalive_timeout  65;
+
+    server {
+        listen       80;
+        server_name  localhost;
+
+        location / {
+            # 새 Mac의 사용자명에 맞춰 경로 수정 필수 (예: /Users/새유저명/Desktop/Dell_Baremetal_Provisioning)
+            root   /Users/gibeom/Desktop/Dell_Baremetal_Provisioning;
+            autoindex on;
+        }
+    }
+}
+
+3. nginx -t (문법 검사)
+4. sudo brew services start nginx (서비스 시작)
+
+---
+
+Windows OS (Windows PowerShell 관리자 권한으로 실행)
+
+# WSL2 및 Ubuntu 설치
+
+wsl --install (설치 완료 후 1회 재부팅 필수 -> Ubuntu 터미널 자동으로 열리면 UNIX 계정(ID/PW) 생성)
+
+# Ubuntu(WSL) 내 필수 패키지 설치
+
+1. sudo apt update
+2. sudo apt install -y ansible sshpass p7zip-full xorriso nginx python3-pip (Ansible 및 의존성 패키지 일괄 설치)
+3. pip3 install requests omsdk --break-system-packages (Dell iDRAC 제어용 Python 모듈 설치)
+4. ansible-galaxy collection install dellemc.openmanage (Ansible Dell 컬렉션 설치)
+
+# Nginx 구성 및 볼륨 마운트 주의사항 (Windows 환경의 WSL에서는 경로 인식 방식 다름 -> Windows의 C:\ 드라이브 WSL에서 /mnt/c/로 마운트 됨)
+
+1. sudo vi /etc/nginx/nginx.conf (Windows 바탕화면에 Dell_Baremetal_Provisioning 폴더가 있는 경우)
+
+location / {
+    root /mnt/c/Users/사용자계정명/Desktop/Dell_Baremetal_Provisioning;
+    autoindex on;
+}
+
+2. sudo nginx -t (문법 검사)
+3. sudo service nginx start (서비스 시작 -> WSL에서는 systemctl이나 service 명령어 사용)
+
+# Windows(WSL) 환경 사용 시 핵심 팁
+
+1. 쉘 스크립트 Windows 메모장, VSCode 편집 시 줄바꿈 문자(CRLF) 들어가면 실행 시 \r: command not found 에러 발생 -> 반드시 에디터 우측 하단에서 줄바꿈 LF 설정 후 저장.
+2. 가상 스위치 통해 IP 할당받아 all.yml, shell의 Nginx를 띄운 PC의 IP 변수에 WSL 내부의 IP(ip addr로 확인), 포트 포워딩된 Windows 호스트의 IP 정확히 매핑해야 iso 다운로드 가능.

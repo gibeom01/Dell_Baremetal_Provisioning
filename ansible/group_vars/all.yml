@@ -1,0 +1,48 @@
+---
+# =========================================================
+# 메인 컨트롤 스위치 (OS 설치 및 하드웨어 구성 제어)
+# =========================================================
+node_install_enabled: true    # 하드웨어 세팅만 수행 시 false, OS 설치까지 포함 시 true
+update_firmware: false        # 펌웨어 업데이트 수행 여부 (스킵 시 false)
+clear_physical_disks: true 
+clear_bios: true 
+
+global_idrac_user: "root"
+global_idrac_password: "calvin"
+mac_http_ip: "121.125.69.250" 
+
+# =========================================================
+# 대상 서버 목록
+# =========================================================
+nodes:
+  idc-node-01:
+    idrac_ip: "169.254.0.3"
+    idrac_ver: "9" 
+    http_port: 80
+    node_ip: "121.125.69.252"
+    node_sub: "255.255.255.224"
+    node_gw: "121.125.69.225"
+    node_dns: "210.220.163.82, 168.126.63.1"
+    root_pw: "!Passwordlinux2026"
+    pub_key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCt768DAwdU74Zp0HcmKABq14snv2E57hIXNYHCOZVl5Z0LDCaf/0MqBASww/h982MijekoETAeO3OeHAC0R0ox7mdNvE7B5PY773HUlpM/NpVCqaQ9y4Yugz/03y8eHu3UWM1/5vZUw3eq9Ic2L0lZCrRaGXxxGnbpquTRp9QkyKaveNcyNcLt/3GC44HXNwA191FLqaINLJ1LoNxFKBQhN+GfVuHGpiDKz+G9xkK4dFVWpfSsYy3zAOc1FWZlO4logBw3Mkk1fH7snivAR/X9btemkQTgFBnUz9kX5Pz8Rew5VNt4kTUubieRSzM/YALPwRVK/Z0avp1EUW4sYx5f0DA+XrBd1n0Rt1AVetpo6YZbNH+5ojWlIdvD9WPCaIqoS9wteWhVw/T0JQ1zUDd7rIRrdrLQ6KXqwhxxcqVX4lhNe02m/4X1pjL/5jsmRe/PXDQ6Hspzi7Y1tLMHMCvsRe87vCAgpqWia4KDP74EfXN/oUxXdHVXaYJp1oXs80HL7AAPBqBWkVPyay9sK1iknJphpO1CvpoiubGic5V2TXk1BU5u6h1bsCDwFgng1Oew3LDl1gruUGGOILUmENuvzWnEHPcVVm110GHyeVIQm29rENAhetfLIqEtHLQA3v8p6UGEZKqgflp4eCZjnIo9brZ0orh7uH4AvwpmIwX3GQ=="
+    node_type: "rocky"
+    iso_name: "rocky_custom.iso"
+    node_volume_root_size: "max"
+    node_volume_swap_size: "32GB"
+    node_volume_boot_size: "1GB"
+    node_volume_var_size: "0MB"
+    node_volume_data_size: "0KB"
+    node_volume_tmp_size: "0TB"
+    node_volume_home_size: "0GB"
+    raid_volumes:
+      - name: "OS_RAID0"
+        type: "RAID 0"
+        drives:
+          - "Disk.Bay.0:Enclosure.Internal.0-1:RAID.Integrated.1-1"
+          - "Disk.Bay.1:Enclosure.Internal.0-1:RAID.Integrated.1-1"
+      - name: "DATA_RAID1"
+        type: "RAID 1"
+        drives:
+          - "Disk.Bay.2:Enclosure.Internal.0-1:RAID.Integrated.1-1"
+          - "Disk.Bay.3:Enclosure.Internal.0-1:RAID.Integrated.1-1"
+          

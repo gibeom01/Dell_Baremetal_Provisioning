@@ -1,0 +1,89 @@
+---
+- name: Dell iDRAC 물리 디스크 RAID 1 미러링 자동 구성
+  hosts: localhost    # Mac 로컬에서 실행
+  gather_facts: no
+
+  vars:
+    # idrac_ip, idrac_user, idrac_password는 Terraform에서 런타임에 주입됨
+    controller_fqdd: "RAID.Integrated.1-1"  # 레이드 컨트롤러 이름은 환경 공통이므로 유지
+    # 직관적인 문자열을 Redfish API 표준어로 번역해주는 사전(Dictionary)
+    raid_map:
+      "RAID 0": "r0"
+      "RAID 1": "r1"
+      "RAID 5": "r5"
+      "RAID 6": "r6"
+      "RAID 10": "r10"
+    # 수정: SSH 접속 앵커를 전역 변수 영역으로 이동하여 안정성 확보
+    idrac_ssh_vars: &idrac_ssh_vars
+      ansible_connection: ssh
+      ansible_user: "{{ idrac_user }}"
+      ansible_password: "{{ idrac_password }}"
+      ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+  tasks:
+    - name: "[iDRAC 9] Redfish API로 BIOS 초기화"
+      when: idrac_ver | int >= 9
+      uri:
+        url: "https://{{ idrac_ip }}/redfish/v1/Systems/System.Embedded.1/Bios/Actions/Bios.ResetBios"
+        method: POST
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_password }}"
+        validate_certs: no
+        status_code: [200, 202, 204]
+        body: {}
+        body_format: json
+      ignore_errors: yes
+
+    - name: "[iDRAC 7/8] RACADM으로 BIOS 초기화"
+      when: idrac_ver | int < 9
+      ansible.builtin.raw: "racadm set BIOS.Setup.1.ResetConfig 1"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "Step 1: Foreign 잠금 해제"
+      ansible.builtin.raw: "racadm {{ (idrac_ver | int >= 9) | ternary('storage', 'raid') }} clearforeignconfig:{{ controller_fqdd }}"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "Step 2: 기존 RAID 구성 완전 삭제"
+      ansible.builtin.raw: "racadm {{ (idrac_ver | int >= 9) | ternary('storage', 'raid') }} resetconfig:{{ controller_fqdd }}"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "Step 3: 설정한 RAID 볼륨 동적 생성 예약"
+      ansible.builtin.raw: >
+        racadm {{ (idrac_ver | int >= 9) | ternary('storage createvd:', 'raid createvd -c ') }}{{ controller_fqdd }} 
+        -rl {{ raid_map[item.type] | default('r1') }} 
+        -name {{ item.name }} 
+        -pdkey:{{ item.drives | join(',') }}
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      loop: "{{ raid_volumes | default([]) }}"
+      ignore_errors: yes
+
+    - name: "Step 4: 예약 작업(삭제+생성) 실행 큐 등록 (공통)"
+      ansible.builtin.raw: "racadm jobqueue create {{ controller_fqdd }} -r pwrcycle -s TIME_NOW"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+      ignore_errors: yes
+
+    - name: "잠시 대기 (iDRAC 작업 정리 시간)"
+      pause:
+        seconds: 30
+
+    - name: "Step 5: RAID 구성을 적용하기 위한 서버 강제 재부팅 (RACADM 통합)"
+      ansible.builtin.raw: "racadm serveraction powercycle"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars
+
+    - name: "Step 6: Lifecycle Controller의 1차 작업 대기 (약 6분)"
+      pause:
+        minutes: 6
+
+    - name: "Step 7: 가상 디스크(VD) 최종 생성을 위한 2차 강제 재부팅"
+      ansible.builtin.raw: "racadm serveraction powercycle"
+      delegate_to: "{{ idrac_ip }}"
+      vars: *idrac_ssh_vars

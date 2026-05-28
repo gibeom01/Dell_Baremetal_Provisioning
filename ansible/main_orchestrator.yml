@@ -1,0 +1,161 @@
+---
+- name: Stage 1 - Generate Custom ISO Dynamically
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Create logs directory
+      ansible.builtin.file:
+        path: "../logs"
+        state: directory
+        mode: '0755'
+
+    - name: Extract Unique Node Types and Run ISO Scripts
+      ansible.builtin.shell: |
+        echo "=== [ {{ item }} ISO 자동 생성 시작 ] ==="
+        cd ../scripts
+        if [ "{{ item }}" = "windows" ]; then
+          bash ./make_win_iso.sh > ../logs/make_iso_{{ item }}.log 2>&1
+        elif [ "{{ item }}" = "rocky" ] || [ "{{ item }}" = "centos" ] || [ "{{ item }}" = "ubuntu" ] || [ "{{ item }}" = "ubuntu_legacy" ] || [ "{{ item }}" = "centos_legacy" ]; then
+          bash ./make_linux_iso.sh {{ item }} > ../logs/make_iso_{{ item }}.log 2>&1
+        else
+          echo "지원하지 않는 OS 타입입니다: {{ item }}"
+          exit 1
+        fi
+      # 수정 1: nodes.values()는 Python 문법입니다. Ansible에서는 dict2items 필터를 사용해야 합니다.
+      loop: "{{ nodes | dict2items | map(attribute='value.node_type') | select('defined') | unique | list }}"
+      when: node_install_enabled | bool
+      register: iso_generation_result
+
+- name: Stage 2 - Hardware Provisioning and OS Deployment
+  hosts: dell_servers
+  gather_facts: false
+  vars:
+    node_info: "{{ nodes[inventory_hostname] }}"
+  tasks:
+    - name: Execute Server Provisioning Block
+      block:
+        - name: "[{{ inventory_hostname }}] 1) 펌웨어 업데이트 수행"
+          ansible.builtin.command: >
+            ansible-playbook update_firmware.yml
+            -e "idrac_ip={{ node_info.idrac_ip }} idrac_user={{ global_idrac_user }} idrac_password={{ global_idrac_password }} idrac_ver={{ node_info.idrac_ver }}"
+            -e "update_firmware={{ update_firmware }}"
+          register: fw_out
+          changed_when: true
+          
+        - name: Save Firmware Log
+          ansible.builtin.copy:
+            content: "{{ fw_out.stdout }}\n{{ fw_out.stderr }}"
+            dest: "../logs/{{ inventory_hostname }}_01_firmware.log"
+            mode: '0644'
+            
+        - name: "[{{ inventory_hostname }}] 2) 다중 RAID 동적 구성"
+          ansible.builtin.command: >
+            ansible-playbook configure_raid.yml
+            -e "idrac_ip={{ node_info.idrac_ip }} idrac_user={{ global_idrac_user }} idrac_password={{ global_idrac_password }} idrac_ver={{ node_info.idrac_ver }}"
+            -e "clear_physical_disks={{ clear_physical_disks }} clear_bios={{ clear_bios }}"
+            -e '{"raid_volumes": {{ node_info.raid_volumes | to_json }} }'
+          register: raid_out
+          changed_when: true
+          
+        - name: Save RAID Log
+          ansible.builtin.copy:
+            content: "{{ raid_out.stdout }}\n{{ raid_out.stderr }}"
+            dest: "../logs/{{ inventory_hostname }}_02_raid.log"
+            mode: '0644'
+
+        - name: RACADM Remote Image Mount and Boot Sequence
+          block:
+            - name: "[{{ inventory_hostname }}] 기존 가상 CD 연결 강제 해제"
+              ansible.builtin.command: >
+                racadm -r {{ node_info.idrac_ip }} -u {{ global_idrac_user }} -p '{{ global_idrac_password }}' remoteimage -d
+              failed_when: false 
+              
+            - name: Wait for status clear
+              ansible.builtin.pause:
+                seconds: 5
+                
+            - name: "[{{ inventory_hostname }}] 커스텀 ISO 강제 마운트 (Mac USB IP 바인딩)"
+              ansible.builtin.command: >
+                racadm -r {{ node_info.idrac_ip }} -u {{ global_idrac_user }} -p '{{ global_idrac_password }}' remoteimage -c -l http://169.254.0.4/iso/{{ node_info.iso_name }}
+                
+            - name: Wait for mounting stability
+              ansible.builtin.pause:
+                seconds: 5
+                
+            - name: "[{{ inventory_hostname }}] 1회성 차기 부팅 장치를 가상 CD(VCD-DVD)로 강제 고정"
+              ansible.builtin.command: >
+                racadm -r {{ node_info.idrac_ip }} -u {{ global_idrac_user }} -p '{{ global_idrac_password }}' set iDRAC.ServerBoot.FirstBootDevice VCD-DVD
+                
+            - name: "[{{ inventory_hostname }}] 3) OS 자동 설치 및 배포 플레이북 호출"
+              ansible.builtin.command: >
+                ansible-playbook deploy_os.yml
+                -e "idrac_ip={{ node_info.idrac_ip }} idrac_user={{ global_idrac_user }} idrac_password={{ global_idrac_password }} idrac_ver={{ node_info.idrac_ver }}"
+                -e "mac_http_ip={{ mac_http_ip }} http_port={{ node_info.http_port }} iso_name={{ node_info.iso_name }} node_type={{ node_info.node_type }}"
+                -e "node_volume_root_size={{ node_info.node_volume_root_size }} node_volume_swap_size={{ node_info.node_volume_swap_size }} node_volume_boot_size={{ node_info.node_volume_boot_size }}"
+                -e "node_volume_var_size={{ node_info.node_volume_var_size }} node_volume_data_size={{ node_info.node_volume_data_size }} node_volume_tmp_size={{ node_info.node_volume_tmp_size }} node_volume_home_size={{ node_info.node_volume_home_size }}"
+              register: deploy_out
+              
+            - name: Save Deployment Log
+              ansible.builtin.copy:
+                content: "{{ deploy_out.stdout }}\n{{ deploy_out.stderr }}"
+                dest: "../logs/{{ inventory_hostname }}_03_deploy.log"
+                mode: '0644'
+          when: node_install_enabled | bool
+      rescue:
+        - name: "[장애 감지] {{ inventory_hostname }} 처리 중 에러 발생"
+          ansible.builtin.debug:
+            msg: "해당 장비의 인프라 구성 단계에서 치명적 에러가 발생했으나 다른 노드의 배포를 위해 진행을 유지합니다."
+
+- name: Stage 3 - Post-OS Configuration Orchestration
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Dynamically Add Provisioned Hosts to Memory Inventory
+      ansible.builtin.add_host:
+        name: "{{ item.value.node_ip }}"
+        groups: baremetal_hosts
+        node_type: "{{ item.value.node_type }}"
+        node_key_name: "{{ item.key }}"
+        # 수정 2: 사후 환경 설정(Stage 4)에서 쓰일 접속 패스워드와 네트워크 변수들을 동적 인벤토리에 주입합니다.
+        node_gw: "{{ item.value.node_gw }}"
+        node_dns: "{{ item.value.node_dns }}"
+        root_pw: "{{ item.value.root_pw }}"
+      loop: "{{ nodes | dict2items }}"
+      when: node_install_enabled | bool
+
+- name: Stage 4 - Run Configuration Playbooks on Target OS
+  hosts: baremetal_hosts
+  gather_facts: false 
+  tasks:
+    - name: Execute Node Post Configuration
+      block:
+        - name: "[{{ node_key_name }}] Windows OS 환경설정 런타임 진입"
+          ansible.builtin.command: >
+            ansible-playbook windows_config.yml --limit {{ inventory_hostname }}
+          register: win_cfg_out
+          when: node_type == "windows"
+          
+        - name: Save Windows Config Log
+          ansible.builtin.copy:
+            content: "{{ win_cfg_out.stdout }}\n{{ win_cfg_out.stderr }}"
+            dest: "../logs/{{ node_key_name }}_04_node_config.log"
+            mode: '0644'
+          when: node_type == "windows"
+          
+        - name: "[{{ node_key_name }}] Linux (Rocky/CentOS/Ubuntu) OS 환경설정 런타임 진입"
+          ansible.builtin.command: >
+            ansible-playbook linux_config.yml --limit {{ inventory_hostname }}
+          register: nix_cfg_out
+          when: node_type in ['rocky', 'centos', 'ubuntu', 'ubuntu_legacy', 'centos_legacy']
+          
+        - name: Save Linux Config Log
+          ansible.builtin.copy:
+            content: "{{ nix_cfg_out.stdout }}\n{{ nix_cfg_out.stderr }}"
+            dest: "../logs/{{ node_key_name }}_04_node_config.log"
+            mode: '0644'
+          when: node_type in ['rocky', 'centos', 'ubuntu', 'ubuntu_legacy', 'centos_legacy']
+      rescue:
+        - name: "[사후설정 장애] {{ inventory_hostname }} 사후 설정 실패"
+          ansible.builtin.debug:
+            msg: "네트워크 토폴로지 설정 혹은 사후 패키지 배포 과정에서 문제 발생. 수동 점검 요망."
+            
