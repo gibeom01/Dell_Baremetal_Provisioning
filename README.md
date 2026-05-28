@@ -1,11 +1,11 @@
-# Ansible 자동화 파이프라인 실행 방법
+## Ansible 자동화 파이프라인 실행 방법
 
 ###### 1. cd /Users/gibeom/Desktop/Dell_Baremetal_Provisioning/ansible (작업 디렉토리 이동)
 ###### 2. ansible-playbook -i inventory.ini main_orchestrator.yml --forks 10 (--forks 10 Ansible이 동시에 작업할 최대 노드 개수 -> 서버가 3대라면 3, 10대라면 10 입력 후 진행)
 
 ---
 
-# 문법 검증 방법 -> 하드웨어 세팅 단계(Stage 1~2) --syntax-check로 문법만 확인한 뒤, 서비스가 올라간 OS 환경설정(Stage 3~4) 유지보수할 때는 --check --diff 적극적으로 활용
+## 문법 검증 방법 -> 하드웨어 세팅 단계(Stage 1~2) --syntax-check로 문법만 확인한 뒤, 서비스가 올라간 OS 환경설정(Stage 3~4) 유지보수할 때는 --check --diff 적극적으로 활용
 
 ###### 1. 문법 검증 (Syntax Check) -> ansible-playbook linux_config.yml --syntax-check -i inventory.ini
 ###### 2. 가상 실행 (Dry-run / Check Mode) -> ansible-playbook linux_config.yml --check -i inventory.ini
@@ -13,7 +13,7 @@
 
 ---
 
-# 특정 태그만 실행 -> 네트워크 정책이 변경되어 전체 Linux 서버의 DNS와 Gateway IP(Netplan/nmcli)만 다시 세팅해야 할 경우 사용.
+## 특정 태그만 실행 -> 네트워크 정책이 변경되어 전체 Linux 서버의 DNS와 Gateway IP(Netplan/nmcli)만 다시 세팅해야 할 경우 사용.
 
 ###### ansible-playbook -i inventory.ini linux_config.yml -e "@group_vars/all.yml" --tags "network"
 
@@ -27,7 +27,7 @@
 
 ---
 
-# Troubleshooting
+## Troubleshooting
 
 ### 증상 1: ansible-playbook 명령을 치자마자 에러가 나며 멈춤
 ###### -> 확인 지점: Syntax Error이거나 YAML 들여쓰기 문제일 확률이 99%
